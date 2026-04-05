@@ -1,0 +1,106 @@
+const UA =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36";
+
+const PRESETS = {
+    wechat: {
+        Referer: "https://mp.weixin.qq.com",
+    },
+};
+
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+};
+
+function error(msg, status = 400) {
+    return new Response(msg, { status, headers: CORS_HEADERS });
+}
+
+function checkToken(req, env) {
+    if (!env.TOKEN) return; // 未配置 token 则跳过校验
+    const authHeader = req.headers.get("Authorization") || "";
+    const token = authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : new URL(req.url).searchParams.get("token");
+    if (token !== env.TOKEN) throw new Error("Unauthorized");
+}
+
+async function parseRequest(req) {
+    const origin = req.headers.get("origin") || "*";
+
+    let targetURL = "";
+    let targetMethod = "GET";
+    let targetBody = "";
+    let targetHeaders = {};
+    let preset = "";
+
+    const method = req.method.toLowerCase();
+    if (method === "get") {
+        const { searchParams } = new URL(req.url);
+        targetURL = searchParams.get("url") || "";
+        if (searchParams.has("method")) targetMethod = searchParams.get("method").toUpperCase();
+        targetBody = searchParams.get("body") || "";
+        if (searchParams.has("headers")) {
+            try {
+                targetHeaders = JSON.parse(searchParams.get("headers"));
+            } catch (_) {
+                throw new Error("headers not valid");
+            }
+        }
+        preset = searchParams.get("platform") || searchParams.get("preset") || "";
+    } else if (method === "post") {
+        const payload = await req.json();
+        if (payload.url) targetURL = payload.url;
+        if (payload.method) targetMethod = payload.method.toUpperCase();
+        if (payload.body) targetBody = payload.body;
+        if (payload.headers) targetHeaders = payload.headers;
+        preset = payload.platform || payload.preset || "";
+    } else {
+        throw new Error("Method not implemented");
+    }
+
+    if (!targetURL) throw new Error("URL not found");
+    if (!/^https?:\/\//.test(targetURL)) throw new Error("URL not valid");
+    if (targetMethod === "GET" && targetBody) throw new Error("GET method can't have body");
+    if (Object.prototype.toString.call(targetHeaders) !== "[object Object]") {
+        throw new Error("Headers not valid");
+    }
+    if (!targetHeaders["User-Agent"]) targetHeaders["User-Agent"] = UA;
+    if (preset in PRESETS) Object.assign(targetHeaders, PRESETS[preset]);
+
+    return { origin, targetURL, targetMethod, targetBody, targetHeaders };
+}
+
+export default {
+    async fetch(request, env) {
+        if (request.method === "OPTIONS") {
+            return new Response(null, { status: 204, headers: CORS_HEADERS });
+        }
+
+        try {
+            checkToken(request, env);
+            const { origin, targetURL, targetMethod, targetBody, targetHeaders } =
+                await parseRequest(request);
+
+            const response = await fetch(targetURL, {
+                method: targetMethod,
+                body: targetBody || undefined,
+                headers: targetHeaders,
+            });
+
+            return new Response(response.body, {
+                status: response.status,
+                headers: {
+                    ...CORS_HEADERS,
+                    "Access-Control-Allow-Origin": origin,
+                    "Content-Type": response.headers.get("Content-Type"),
+                },
+            });
+        } catch (err) {
+            const status = err.message === "Unauthorized" ? 401 : 400;
+            return error(err.message, status);
+        }
+    },
+};
